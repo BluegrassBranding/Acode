@@ -1,0 +1,102 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  push:
+    tags:
+      - nightly
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  BUILD_JSON_PATH: build.json
+
+jobs:
+  build:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+
+    outputs:
+      updated_version: ${{ steps.update-version.outputs.UPDATED_VERSION }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Export Commit Hash
+        run: |
+          echo "GIT_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Extract version from config.xml
+        id: extract_version
+        run: |
+          if [ ! -f config.xml ]; then
+            echo "config.xml not found!"
+            exit 1
+          fi
+          VERSION=$(grep -oP 'version="\K[0-9.]+' config.xml)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted Version: $VERSION"
+
+      - name: Append Commit Hash to Version and Update config.xml
+        id: update-version
+        run: |
+          SHORT_COMMIT_HASH=$(echo "${{ env.GIT_COMMIT }}" | cut -c 1-7)
+          UPDATED_VERSION="${{ steps.extract_version.outputs.VERSION }}-nightly.${SHORT_COMMIT_HASH}"
+          echo "Updated Version: $UPDATED_VERSION"
+          sed -i "s/version=\"${{ steps.extract_version.outputs.VERSION }}\"/version=\"$UPDATED_VERSION\"/g" config.xml
+          echo "UPDATED_VERSION=$UPDATED_VERSION" >> $GITHUB_ENV
+          echo "UPDATED_VERSION=$UPDATED_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Node.js Packages
+        run: npm install
+
+      - name: Install Cordova CLI
+        run: npm install -g cordova
+
+      - name: Run npm setup
+        run: npm run setup
+
+      - name: Build debug APK
+        run: |
+          node utils/storage_manager.mjs y
+          npm run build paid dev apk
+          mv platforms/android/app/build/outputs/apk/debug/app-debug.apk /tmp/app-debug.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: acode-nightly-${{ env.GIT_COMMIT }}
+          path: /tmp/app-debug.apk
+          retention-days: 7
+
+      - name: Tag and Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          name: ${{ env.UPDATED_VERSION }}
+          tag_name: nightly
+          files: /tmp/app-debug.apk
+          body: |
+            Automated nightly debug build.
+            Commit: ${{ env.GIT_COMMIT }}
